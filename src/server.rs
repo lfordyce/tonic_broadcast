@@ -7,15 +7,16 @@ use structopt::StructOpt;
 
 use futures::{Stream, StreamExt};
 
-use tokio::sync::{mpsc, Mutex, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tonic::transport::Server;
 
+use crate::proto::event::Event::{Join, Leave, Log, ServerShutdown};
+use futures_core::core_reexport::borrow::BorrowMut;
 use proto::broadcast_server::{Broadcast, BroadcastServer};
 use proto::User;
-use crate::proto::event::Event::{Join, Log, Leave, ServerShutdown};
-use std::task::{Context, Poll};
 use std::ops::Deref;
-use futures_core::core_reexport::borrow::BorrowMut;
+use std::task::{Context, Poll};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::error::RecvError;
 
 /// Piping Server in Rust
@@ -45,14 +46,10 @@ pub mod proto {
 }
 
 /// Shorthand for the transmit half of the message channel.
-// type Tx = mpsc::Sender<Result<proto::Event, tonic::Status>>;
 type Tx = mpsc::UnboundedSender<Result<proto::Event, tonic::Status>>;
 
 #[derive(Debug)]
 pub struct Service {
-    // state: Arc<Vec<Peer>>,
-    // state: Arc<Mutex<Vec<Peer>>>,
-
     state: Arc<Mutex<Shared>>,
 }
 
@@ -60,14 +57,11 @@ impl Service {
     fn new(state: Arc<Mutex<Shared>>) -> Self {
         Service { state }
     }
-    // fn new(state: Arc<Mutex<Vec<Peer>>>) -> Self {
-    //     Service { state }
-    // }
 }
 
 #[derive(Debug)]
 struct Shared {
-    peers: HashMap<SocketAddr, Peer>
+    peers: HashMap<SocketAddr, Peer>,
 }
 
 impl Shared {
@@ -78,16 +72,25 @@ impl Shared {
     }
 
     async fn broadcast(&mut self, event: proto::Event) {
-        for peer in self.peers.iter_mut() {
-            let msg = format!("broadcasting message to user_id {:?}", peer.1.user.token);
+        for (addr, peer) in self.peers.iter_mut() {
+            let msg = format!(
+                "broadcasting message to user_id: {:?} at addr: {:?}",
+                peer.user.token, addr
+            );
             tracing::info!("{}", msg);
             let event = event.clone();
-            let _ = peer.1.stream.send(Ok(event));
+            if let Err(e) = peer.stream.send(Ok(event)) {
+                let msg = format!(
+                    "Failed to broadcast message to client {:?}; error {}",
+                    peer.user.token, e
+                );
+                tracing::error!("{}", msg);
+            }
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Peer {
     addr: SocketAddr,
     stream: Tx,
@@ -95,17 +98,52 @@ pub struct Peer {
     receiver: oneshot::Receiver<SocketAddr>,
 }
 
+#[derive(Debug)]
 pub struct DropReceiver<T> {
     chan: Option<(oneshot::Sender<SocketAddr>, SocketAddr)>,
     inner: mpsc::UnboundedReceiver<T>,
+}
+
+impl<T> DropReceiver<T> {
+    /// Create a new `DropReceiver`.
+    pub fn new(
+        recv: UnboundedReceiver<T>,
+        chan: Option<(oneshot::Sender<SocketAddr>, SocketAddr)>,
+    ) -> Self {
+        Self { inner: recv, chan }
+    }
+
+    /// Get back the inner `UnboundedReceiver`.
+    // pub fn into_inner(self) -> UnboundedReceiver<T> {
+    //     self.inner
+    // }
+
+    /// Closes the receiving half of a channel without dropping it.
+    ///
+    /// This prevents any further messages from being sent on the channel while
+    /// still enabling the receiver to drain messages that are buffered.
+    pub fn close(&mut self) {
+        self.inner.close()
+    }
 }
 
 impl<T> Stream for DropReceiver<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // Pin::new(&mut self.inner).poll_next(cx)
         self.inner.poll_recv(cx)
+    }
+}
+
+impl<T> AsRef<UnboundedReceiver<T>> for DropReceiver<T> {
+    fn as_ref(&self) -> &UnboundedReceiver<T> {
+        &self.inner
+    }
+}
+
+impl<T> AsMut<UnboundedReceiver<T>> for DropReceiver<T> {
+    fn as_mut(&mut self) -> &mut UnboundedReceiver<T> {
+        &mut self.inner
     }
 }
 
@@ -125,14 +163,13 @@ impl<T> Drop for DropReceiver<T> {
                 tracing::warn!(message = "failed to send oneshot, the receiver dropped", error = ?e);
             }
         }
-        // std::mem::replace(&mut self.chan, oneshot::Sender<usize>);
     }
 }
 
 #[tonic::async_trait]
 impl Broadcast for Service {
     type JoinStreamStream =
-    Pin<Box<dyn Stream<Item=Result<proto::Event, tonic::Status>> + Send + Sync + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<proto::Event, tonic::Status>> + Send + Sync + 'static>>;
 
     /// create_stream:
     async fn join_stream(
@@ -148,75 +185,26 @@ impl Broadcast for Service {
             Some(user) => {
                 let (tx, rx) = mpsc::unbounded_channel::<Result<proto::Event, tonic::Status>>();
 
-                // let user: User = match event {
-                //     Join(join) => {
-                //         match join.user {
-                //             Some(user) => {
-                //                 tracing::info!(message = "user joined", user_id = ?user.token, user_name = ?user.name);
-                //                 // tokio::spawn(async move {
-                //                 //     if let Err(e) = tx.send(Ok(req)).await {
-                //                 //         println!("error: {:?}", e);
-                //                 //     }
-                //                 // });
-                //                 user
-                //             },
-                //             None => { User { token: "".to_string(), name: "".to_string() } }
-                //         }
-                //         // if let Some(user) = join.user {
-                //         //     tracing::info!(message = "user joined", user_id = ?user.token, user_name = ?user.name);
-                //         //     user
-                //         // }
-                //     }
-                //     Leave(leave) => {
-                //         match leave.user {
-                //             Some(user) => {
-                //                 tracing::info!(message = "user leaving", user_id = ?user.token, user_name = ?user.name);
-                //                 user
-                //             },
-                //             None => { User { token: "".to_string(), name: "".to_string() } }
-                //         }
-                //         // if let Some(user) = leave.user {
-                //         //     tracing::info!(message = "user leaving", user_id = ?user.token, user_name = ?user.name);
-                //         //     user
-                //         // }
-                //     }
-                //     Log(log) => {
-                //         match log.user {
-                //             Some(user) => {
-                //                 tracing::info!(message = "user log", user_id = ?user.token, user_name = ?user.name);
-                //                 user
-                //             },
-                //             None => { User { token: "".to_string(), name: "".to_string() } }
-                //         }
-                //         // if let Some(user) = log.user {
-                //         //     tracing::info!(message = "user log", user_id = ?user.token, user_name = ?user.name);
-                //         //     user
-                //         // }
-                //     }
-                //     ServerShutdown(_) => {
-                //         tracing::info!(message = "event shutdown");
-                //         User { token: "".to_string(), name: "".to_string() }
-                //     }
-                // };
-
                 tracing::info!(message = "join request stream", user_id = ?user.token, user_name = ?user.name);
 
                 let (oneshot_tx, oneshot_rx) = oneshot::channel::<SocketAddr>();
 
-                let peer = Peer { addr: peer_addr.unwrap(), stream: tx, receiver: oneshot_rx, user };
-                self.state.lock().await.peers.insert(peer_addr.unwrap(), peer);
-
-                let rx = DropReceiver {
-                    inner: rx,
-                    chan: Some((oneshot_tx, peer_addr.unwrap())),
+                let peer = Peer {
+                    addr: peer_addr.unwrap(),
+                    stream: tx,
+                    receiver: oneshot_rx,
+                    user,
                 };
+                self.state
+                    .lock()
+                    .await
+                    .peers
+                    .insert(peer_addr.unwrap(), peer);
 
-                Ok(tonic::Response::new(Box::pin(
-                    // tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
-                    rx
-                )))
+                let rx = DropReceiver::new(rx, Some((oneshot_tx, peer_addr.unwrap())));
+
+                Ok(tonic::Response::new(Box::pin(rx)))
             }
-            // maybe: Some(ref event)
             None => Err(tonic::Status::new(
                 tonic::Code::InvalidArgument,
                 "name is invalid",
@@ -232,115 +220,15 @@ impl Broadcast for Service {
         tracing::info!("broadcast event received");
 
         let event: proto::Event = request.into_inner();
-
-        // let mut state = self.state.lock().await;
-        // let mut state = self.state.clone();
-        // let state = Arc::clone(&self.state);
-
-        // tokio::task::spawn_blocking(move || {
-        //     tokio::spawn(async move {
-        //         {
-        //             let mut state = state.lock().await;
-        //             state.broadcast(event).await;
-        //         }
-        //     });
-        // });
-
-
-        // let state = self.state.clone();
-        // for peer in &state[..] {
-        //     let event = event.clone();
-        //     tokio::task::spawn_blocking(move || {
-        //         tokio::spawn(async move {
-        //             if let Err(e) = peer.stream.send(Ok(event)).await {
-        //                 let msg = format!(
-        //                     "Failed to broadcast message to client {:?}; error {}",
-        //                     peer.user.token, e
-        //                 );
-        //                 tracing::error!("{}", msg);
-        //                 // tracing::error!(message = "failed to send message", error = ?e);
-        //             }
-        //             let msg = format!("broadcasting message to user_id {:?}", peer.user.token);
-        //             tracing::info!("{}", msg);
-        //             // tracing::info!(message = "broadcasting message", user_session_id = ?conn.session_id);
-        //         });
-        //     });
-        // }
-
-        // let clone_state = Arc::clone(&self.state);
-        // let mut lock_state = clone_state.lock().await;
-        // for (mut key, mut peer) in lock_state.peers.iter_mut() {
-        //     let event = event.clone();
-        //     tokio::task::spawn_blocking(move || {
-        //         tokio::spawn(async move {
-        //             if let Err(e) = peer.stream.send(Ok(event)).await {
-        //                 let msg = format!(
-        //                     "Failed to broadcast message to client {:?}; error {}",
-        //                     peer.user.token, e
-        //                 );
-        //                 tracing::error!("{}", msg);
-        //                 // tracing::error!(message = "failed to send message", error = ?e);
-        //             }
-        //             let msg = format!("broadcasting message to user_id {:?}", peer.user.token);
-        //             tracing::info!("{}", msg);
-        //             // tracing::info!(message = "broadcasting message", user_session_id = ?conn.session_id);
-        //         });
-        //     });
-        // }
-
-        // for mut peer in self.state.lock().await.to_vec() {
-        //     let event = event.clone();
-        //     tokio::task::spawn_blocking(move || {
-        //         tokio::spawn(async move {
-        //             if let Err(e) = peer.stream.send(Ok(event)) {
-        //                 let msg = format!(
-        //                     "Failed to broadcast message to client {:?}; error {}",
-        //                     peer.user.token, e
-        //                 );
-        //                 tracing::error!("{}", msg);
-        //             }
-        //             let msg = format!("broadcasting message to user_id {:?}", peer.user.token);
-        //             tracing::info!("{}", msg);
-        //         });
-        //     });
-        // }
-
-        // for mut peer in self.state.lock().await.to_vec() {
-        //     let event = event.clone();
-        //     tokio::spawn(async move {
-        //         if let Err(e) = peer.stream.send(Ok(event)) {
-        //             let msg = format!(
-        //                 "Failed to broadcast message to client {:?}; error {}",
-        //                 peer.user.token, e
-        //             );
-        //             tracing::error!("{}", msg);
-        //         }
-        //         let msg = format!("broadcasting message to user_id {:?}", peer.user.token);
-        //         tracing::info!("{}", msg);
-        //     });
-        // }
-
         let state = self.state.clone();
+
         tokio::spawn(async move {
             let mut state = state.lock().await;
-
-            for (addr, peer) in state.peers.iter_mut() {
-                let event = event.clone();
-
-                if let Err(e) = peer.stream.send(Ok(event)) {
-                    let msg = format!(
-                        "Failed to broadcast message to client {:?}; error {}",
-                        peer.user.token, e
-                    );
-                    tracing::error!("{}", msg);
-                }
-                let msg = format!("broadcasting message to user_id: {:?} at addr: {:?}", peer.user.token, addr);
-                tracing::info!("{}", msg);
-
-
-            }
+            state.broadcast(event).await;
         });
-        Ok(tonic::Response::new(proto::MessageAck { status: "SENT".to_string() }))
+        Ok(tonic::Response::new(proto::MessageAck {
+            status: "SENT".to_string(),
+        }))
     }
 }
 
