@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package proto;
+
+import "google/protobuf/timestamp.proto";
+
+message User {
+    string token = 1;
+    string name = 2;
+}
+
+message Message {
+    string id = 1;
+    string content = 2;
+}
+
+message JoinRequest {
+    User user = 1;
+}
+
+message MessageAck {
+    string status = 1;
+}
+
+message Event {
+    google.protobuf.Timestamp timestamp = 1;
+
+    oneof event {
+        EventJoin     join            = 2;
+        EventLeave    leave           = 3;
+        EventLog      log             = 4;
+        EventShutdown server_shutdown = 5;
+    }
+
+    message EventJoin {
+        User user = 1;
+    }
+
+    message EventLeave {
+        User user = 1;
+    }
+
+    message EventLog {
+        User    user    = 1;
+        Message message = 2;
+    }
+
+    message EventShutdown {
+    }
+}
+
+
+service Broadcast {
+    rpc JoinStream (JoinRequest) returns (stream Event);
+    rpc BroadcastEvent (Event) returns (MessageAck);
+}
