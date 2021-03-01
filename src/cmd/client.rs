@@ -1,24 +1,25 @@
-use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use uuid;
 
-use futures::{StreamExt, SinkExt, future::BoxFuture};
+use futures::{future::BoxFuture, SinkExt, StreamExt};
 use tokio::io;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
-use tokio_util::codec::{Framed, FramedRead, FramedWrite, LinesCodec, LinesCodecError, BytesCodec};
+use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite, LinesCodec, LinesCodecError};
 
-use tonic::transport::{Endpoint, Channel};
-use tonic::Request;
 use async_stream::{stream, try_stream};
 use futures_core::stream::Stream;
 use futures_util::pin_mut;
+use tonic::transport::{Channel, Endpoint};
+use tonic::Request;
 
 use proto::broadcast_client::BroadcastClient;
-use proto::{User, Message};
-use crate::proto::event::Event::{Join, Log, Leave, ServerShutdown};
+use proto::event::Event::{Join, Leave, Log, ServerShutdown};
+use proto::{Message, User};
+
 use tonic::body::Body;
 
 use prost_types::Timestamp;
@@ -27,19 +28,20 @@ pub mod proto {
     tonic::include_proto!("proto");
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+use crate::ClientOpts;
+
+pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Error>> {
     // let addr: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9090);
     // let mut client = BroadcastClient::connect("http://127.0.0.1:9090").await?;
 
-    let channel = Endpoint::from_static("http://[::1]:20000").connect().await?;
-    let main_client = BroadcastClient::new(channel);
+    // let channel = Endpoint::from_static(&*opts.server_addr).connect().await?;
+    // let main_client = BroadcastClient::new(channel);
+    let main_client = BroadcastClient::connect(opts.server_addr).await?;
 
     let mut client1 = main_client.clone();
     let mut client2 = main_client.clone();
 
     let token = uuid::Uuid::new_v4();
-
 
     let mut prompt = FramedWrite::new(io::stdout(), LinesCodec::new());
     // Send a prompt to the client to enter their username.
@@ -78,8 +80,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         while let Some(value) = outbound.next().await {
             let event_log = proto::event::EventLog {
-                user: Some(User { token: token.to_string(), name: username1.to_string() }),
-                message: Some(Message { id: token.to_string(), content: value }),
+                user: Some(User {
+                    token: token.to_string(),
+                    name: username1.to_string(),
+                }),
+                message: Some(Message {
+                    id: token.to_string(),
+                    content: value,
+                }),
             };
 
             let timestamp = Timestamp::from(std::time::SystemTime::now());
@@ -96,14 +104,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let join_request = proto::JoinRequest {
-        user: Some(User { token: token.to_string(), name: username2.to_string() }),
+        user: Some(User {
+            token: token.to_string(),
+            name: username2.to_string(),
+        }),
     };
 
-    let mut stream = client2.join_stream(Request::new(join_request)).await?.into_inner();
+    let mut stream = client2
+        .join_stream(Request::new(join_request))
+        .await?
+        .into_inner();
     while let Some(msg) = stream.message().await? {
-
-
-
         // let output = format!("{}: {}", msg, msg);
         println!("MESSAGE = {:?}", msg);
     }
@@ -207,4 +218,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //         }
 //     }
 // }
-

@@ -1,46 +1,23 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
-
-use structopt::StructOpt;
-
-use tokio_stream::{Stream, StreamExt, StreamMap};
-use futures::SinkExt;
-
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tonic::transport::Server;
-
-use crate::proto::event::Event::{Join, Leave, Log, ServerShutdown};
-use futures_core::core_reexport::borrow::BorrowMut;
-use proto::broadcast_server::{Broadcast, BroadcastServer};
-use proto::User;
-use std::ops::Deref;
 use std::task::{Context, Poll};
+
+use futures::SinkExt;
+use tokio_stream::{Stream, StreamExt, StreamMap};
+
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot::error::RecvError;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tonic::transport::Server;
 
-/// Piping Server in Rust
-#[derive(StructOpt, Debug)]
-#[structopt(name = "broadcast-server")]
-#[structopt(rename_all = "kebab-case")]
-struct Opt {
-    /// HTTP port
-    #[structopt(long, default_value = "20000")]
-    port: u16,
-    #[structopt(long)]
-    /// Enable HTTPS
-    enable_https: bool,
-    /// HTTPS port
-    #[structopt(long)]
-    https_port: Option<u16>,
-    /// Certification path
-    #[structopt(long)]
-    crt_path: Option<String>,
-    /// Private key path
-    #[structopt(long)]
-    key_path: Option<String>,
-}
+use proto::broadcast_server::{Broadcast, BroadcastServer};
+use proto::event::Event::{Join, Leave, Log, ServerShutdown};
+use proto::User;
+
+use crate::ServerOpts;
 
 pub mod proto {
     tonic::include_proto!("proto");
@@ -145,10 +122,13 @@ pub struct DropReceiver<T> {
 impl<T> DropReceiver<T> {
     /// Create a new `DropReceiver`.
     pub fn new(
-        recv: UnboundedReceiver<T>,
+        recv: mpsc::UnboundedReceiver<T>,
         kill_switch_rx: Option<(oneshot::Sender<SocketAddr>, SocketAddr)>,
     ) -> Self {
-        Self { inner: recv, client_kill_switch: kill_switch_rx }
+        Self {
+            inner: recv,
+            client_kill_switch: kill_switch_rx,
+        }
     }
 
     /// Get back the inner `UnboundedReceiver`.
@@ -173,13 +153,13 @@ impl<T> Stream for DropReceiver<T> {
     }
 }
 
-impl<T> AsRef<UnboundedReceiver<T>> for DropReceiver<T> {
-    fn as_ref(&self) -> &UnboundedReceiver<T> {
+impl<T> AsRef<mpsc::UnboundedReceiver<T>> for DropReceiver<T> {
+    fn as_ref(&self) -> &mpsc::UnboundedReceiver<T> {
         &self.inner
     }
 }
 
-impl<T> AsMut<UnboundedReceiver<T>> for DropReceiver<T> {
+impl<T> AsMut<mpsc::UnboundedReceiver<T>> for DropReceiver<T> {
     fn as_mut(&mut self) -> &mut UnboundedReceiver<T> {
         &mut self.inner
     }
@@ -207,7 +187,7 @@ impl<T> Drop for DropReceiver<T> {
 #[tonic::async_trait]
 impl Broadcast for Service {
     type JoinStreamStream =
-    Pin<Box<dyn Stream<Item=Result<proto::Event, tonic::Status>> + Send + Sync + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<proto::Event, tonic::Status>> + Send + Sync + 'static>>;
 
     /// create_stream:
     async fn join_stream(
@@ -249,7 +229,7 @@ impl Broadcast for Service {
         }
     }
 
-    /// broadcast_message:
+    /// broadcast_event:
     async fn broadcast_event(
         &self,
         request: tonic::Request<proto::Event>,
@@ -279,12 +259,8 @@ pub async fn wait_for_signal(tx: oneshot::Sender<()>) {
     let _ = tx.send(());
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_server(opts: ServerOpts) -> Result<(), Box<dyn std::error::Error>> {
     let (signal_tx, signal_rx) = signal_channel();
-    // tracing_subscriber::FmtSubscriber::builder()
-    //     .with_max_level(tracing::Level::INFO)
-    //     .init();
 
     use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
     // Configure a `tracing` subscriber that logs traces emitted by the chat
@@ -297,7 +273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // can set `RUST_LOG=tokio=trace` to enable additional traces emitted by
         // Tokio itself.
         .with_env_filter(
-            EnvFilter::from_default_env().add_directive("broadcast_server=info".parse()?),
+            EnvFilter::from_default_env().add_directive("tonic_broadcast=info".parse()?),
         )
         // Log events when `tracing` spans are created, entered, exited, or
         // closed. When Tokio's internal tracing support is enabled (as
@@ -308,15 +284,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // the program.
         .init();
 
-    let addr: SocketAddr = "[::1]:20000".parse().unwrap();
+    // let addr: SocketAddr = "[::1]:20000".parse().unwrap();
+    let addr: SocketAddr = opts.server_listen_addr.parse().unwrap();
     // let addr: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 50051);
 
     // let color = Style::new().blue();
     // println!("\nChat BroadcastService gRPC Server ready at: {}", color.apply_to(addr)); // 4.
 
-    // let state = Arc::new(Mutex::new(Vec::new()));
     let state = Arc::new(Mutex::new(Shared::new()));
-    // let state = Arc::new(Vec::new());
     let svc = BroadcastServer::new(Service::new(state));
 
     tracing::info!("server running on {}", addr);
