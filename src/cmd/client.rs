@@ -56,6 +56,8 @@ pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Erro
         }
     };
 
+    tracing::info!("client username entered {}", username);
+
     let username1 = username.clone();
     let username2 = username.clone();
 
