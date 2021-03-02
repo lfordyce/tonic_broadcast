@@ -5,14 +5,14 @@ use clap::Clap;
 #[derive(Clap)]
 pub struct ServerOpts {
     /// Sets the server address
-    #[clap(short, long, default_value = "127.0.0.1:20000")]
+    #[clap(short, long, default_value = "[::1]:20000")]
     pub server_listen_addr: String,
 }
 
 /// runs the gRPC client
 #[derive(Clap)]
 pub struct ClientOpts {
-    #[clap(short, long, default_value = "http://127.0.0.1:20000")]
+    #[clap(short, long, default_value = "http://[::1]:20000")]
     pub server_addr: String,
 }
 
