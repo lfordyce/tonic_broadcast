@@ -12,8 +12,6 @@ use tokio_stream::Stream;
 use tonic::transport::Server;
 
 use proto::broadcast_server::{Broadcast, BroadcastServer};
-use proto::event::Event::{Join, Leave, Log, ServerShutdown};
-use proto::User;
 
 use crate::ServerOpts;
 
@@ -84,10 +82,35 @@ async fn server_loop(mut recv: mpsc::UnboundedReceiver<ToServer>) -> Result<(), 
     let data = Data::default();
     while let Some(msg) = recv.recv().await {
         match msg {
-            ToServer::NewClient(addr, peer, kill_switch) => {
+            ToServer::NewClient(addr, new_peer, kill_switch) => {
+                data.peers.lock().await.insert(addr, new_peer.clone());
                 // spawn task to listen for client drops.
                 tokio::spawn(listen_for_drop(data.peers.clone(), kill_switch));
-                data.peers.lock().await.insert(addr, peer);
+
+                // let everyone know a new client has joined
+                for (socket_addr, peer) in data.peers.lock().await.iter_mut() {
+                    let socket_addr = *socket_addr;
+                    // Don't send it to the client who sent it to us.
+                    if socket_addr == addr { continue; }
+
+                    let user = new_peer.user.clone();
+
+                    let now = prost_types::Timestamp::from(std::time::SystemTime::now());
+                    let join_event = proto::Event {
+                        timestamp: Some(now),
+                        event: Some(proto::event::Event::Join(
+                            proto::event::EventJoin {user: Some(user)}
+                        ))
+                    };
+
+                    if let Err(e) = peer.stream.send(Ok(join_event)) {
+                        let msg = format!(
+                            "Failed to broadcast join event to client {:?}; error {}",
+                            peer.user.token, e
+                        );
+                        tracing::warn!("{}", msg);
+                    }
+                }
             }
             ToServer::Event(from_addr, event) => {
                 let mut state = data.peers.lock().await;
@@ -118,10 +141,10 @@ async fn server_loop(mut recv: mpsc::UnboundedReceiver<ToServer>) -> Result<(), 
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Peer {
     stream: Tx,
-    user: User,
+    user: proto::User,
 }
 
 /// A handle to this actor, used by the server.

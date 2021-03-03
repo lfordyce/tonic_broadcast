@@ -1,26 +1,16 @@
-use std::error::Error;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
 use uuid;
 
-use futures::{future::BoxFuture, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use tokio::io;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::Instant;
-use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite, LinesCodec, LinesCodecError};
+use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
-use async_stream::{stream, try_stream};
-use futures_core::stream::Stream;
+use async_stream::stream;
 use futures_util::pin_mut;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::Channel;
 use tonic::Request;
 
 use proto::broadcast_client::BroadcastClient;
-use proto::event::Event::{Join, Leave, Log, ServerShutdown};
 use proto::{Message, User};
-
-use tonic::body::Body;
 
 use prost_types::Timestamp;
 
@@ -29,7 +19,6 @@ pub mod proto {
 }
 
 use crate::ClientOpts;
-use std::str::FromStr;
 
 pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Error>> {
     let channel = Channel::from_shared(opts.server_addr)?;
@@ -51,7 +40,7 @@ pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Erro
         Some(Ok(line)) => line,
         // We didn't get a line so we return early here.
         _ => {
-            // tracing::error!("Failed to get username from {}. Client disconnected.", addr);
+            tracing::error!("Failed to get username from. Client disconnected.");
             return Ok(());
         }
     };
@@ -114,8 +103,39 @@ pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Erro
         .await?
         .into_inner();
     while let Some(msg) = stream.message().await? {
+        // msg.timestamp
         // let output = format!("{}: {}", msg, msg);
-        println!("MESSAGE = {:?}", msg);
+        match msg.event {
+            Some(event) => {
+                match event {
+                    proto::event::Event::Log(event_log) => {
+                        let user = match event_log.user {
+                            Some(user) => user.name,
+                            _ => "anonymous".to_string(),
+                        };
+                        let msg = match event_log.message {
+                            Some(msg) => msg.content,
+                            _ => "FAILED".to_string(),
+                        };
+                        println!("{}: {}", user, msg);
+                    },
+                    proto::event::Event::Join(event_join) => {
+                        let user = match event_join.user {
+                            Some(user) => user.name,
+                            _ => "anonymous".to_string(),
+                        };
+                        println!("{}: has joined the chat", user);
+                    },
+                    _ => {
+                        println!("UNKNOWN");
+                    }
+                }
+            },
+            _ => {
+                println!("oops??");
+            }
+        }
+        // println!("MESSAGE = {:?}", msg);
     }
     Ok(())
 }
