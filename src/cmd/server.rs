@@ -68,7 +68,10 @@ pub enum ToServer {
     FatalError(io::Error),
 }
 
-async fn listen_for_drop(state: Arc<Mutex<HashMap<SocketAddr, Peer>>>, recv: oneshot::Receiver<SocketAddr>) {
+async fn listen_for_drop(
+    state: Arc<Mutex<HashMap<SocketAddr, Peer>>>,
+    recv: oneshot::Receiver<SocketAddr>,
+) {
     match recv.await {
         Ok(addr) => {
             tracing::info!("drop request received removing client: {}", addr);
@@ -91,16 +94,18 @@ async fn server_loop(mut recv: mpsc::UnboundedReceiver<ToServer>) -> Result<(), 
                 for (socket_addr, peer) in data.peers.lock().await.iter_mut() {
                     let socket_addr = *socket_addr;
                     // Don't send it to the client who sent it to us.
-                    if socket_addr == addr { continue; }
+                    if socket_addr == addr {
+                        continue;
+                    }
 
                     let user = new_peer.user.clone();
 
                     let now = prost_types::Timestamp::from(std::time::SystemTime::now());
                     let join_event = proto::Event {
                         timestamp: Some(now),
-                        event: Some(proto::event::Event::Join(
-                            proto::event::EventJoin {user: Some(user)}
-                        ))
+                        event: Some(proto::event::Event::Join(proto::event::EventJoin {
+                            user: Some(user),
+                        })),
                     };
 
                     if let Err(e) = peer.stream.send(Ok(join_event)) {
@@ -118,11 +123,16 @@ async fn server_loop(mut recv: mpsc::UnboundedReceiver<ToServer>) -> Result<(), 
                 for (addr, peer) in state.iter_mut() {
                     let addr = *addr;
 
-                    let msg = format!("broadcasting message to user_id: {:?} at addr: {:?}", peer.user.token, addr);
+                    let msg = format!(
+                        "broadcasting message to user_id: {:?} at addr: {:?}",
+                        peer.user.token, addr
+                    );
                     tracing::info!("{}", msg);
 
                     // Don't send it to the client who sent it to us.
-                    if addr == from_addr { continue; }
+                    if addr == from_addr {
+                        continue;
+                    }
 
                     let event = event.clone();
 
@@ -150,7 +160,6 @@ pub struct Peer {
 /// A handle to this actor, used by the server.
 #[derive(Debug)]
 pub struct ClientHandle {}
-
 
 #[derive(Debug)]
 pub struct DropReceiver<T> {
@@ -220,7 +229,7 @@ impl<T> Drop for DropReceiver<T> {
 #[tonic::async_trait]
 impl Broadcast for Service {
     type JoinStreamStream =
-    Pin<Box<dyn Stream<Item=Result<proto::Event, tonic::Status>> + Send + Sync + 'static>>;
+        Pin<Box<dyn Stream<Item = Result<proto::Event, tonic::Status>> + Send + Sync + 'static>>;
 
     /// create_stream:
     async fn join_stream(
@@ -239,12 +248,13 @@ impl Broadcast for Service {
                 let (tx, rx) = mpsc::unbounded_channel::<Result<proto::Event, tonic::Status>>();
                 let (kill_switch_tx, kill_switch_rx) = oneshot::channel::<SocketAddr>();
 
-                let peer = Peer {
-                    stream: tx,
-                    user,
-                };
+                let peer = Peer { stream: tx, user };
 
-                match self.state.lock().await.dispatch.send(ToServer::NewClient(peer_addr.unwrap(), peer, kill_switch_rx)) {
+                match self.state.lock().await.dispatch.send(ToServer::NewClient(
+                    peer_addr.unwrap(),
+                    peer,
+                    kill_switch_rx,
+                )) {
                     Ok(_) => {
                         let rx = DropReceiver::new(rx, Some((kill_switch_tx, peer_addr.unwrap())));
                         Ok(tonic::Response::new(Box::pin(rx)))
@@ -271,12 +281,16 @@ impl Broadcast for Service {
         let peer_addr = request.remote_addr();
 
         let event: proto::Event = request.into_inner();
-        match self.state.lock().await.dispatch.send(ToServer::Event(peer_addr.unwrap(), event)) {
-            Ok(_) => {
-                Ok(tonic::Response::new(proto::MessageAck {
-                    status: "SENT".to_string(),
-                }))
-            }
+        match self
+            .state
+            .lock()
+            .await
+            .dispatch
+            .send(ToServer::Event(peer_addr.unwrap(), event))
+        {
+            Ok(_) => Ok(tonic::Response::new(proto::MessageAck {
+                status: "SENT".to_string(),
+            })),
             Err(err) => {
                 let msg = format!("error, {}", err);
                 Err(tonic::Status::new(tonic::Code::Unavailable, msg))
@@ -306,6 +320,8 @@ pub async fn start_server(opts: ServerOpts) -> Result<(), Box<dyn std::error::Er
     tracing::info!("server running on {}", addr);
 
     let _ = tokio::spawn(wait_for_signal(signal_tx));
+
+    tokio::time::sleep()
 
     Server::builder()
         .trace_fn(|_| tracing::info_span!("broadcast_server"))

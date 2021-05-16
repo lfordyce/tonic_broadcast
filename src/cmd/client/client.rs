@@ -2,15 +2,19 @@ use uuid;
 
 use futures::{SinkExt, StreamExt};
 use tokio::io;
+use tokio::sync::{Mutex, RwLock, RwLockReadGuard};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
 use async_stream::stream;
 use futures_util::pin_mut;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 
 use proto::broadcast_client::BroadcastClient;
 use proto::{Message, User};
+
+use std::time::Duration;
+const KEEP_ALIVE_DURATION: Duration = Duration::from_secs(30);
 
 use prost_types::Timestamp;
 
@@ -19,6 +23,36 @@ pub mod proto {
 }
 
 use crate::ClientOpts;
+
+pub struct Client {
+    client: RwLock<BroadcastClient<Channel>>,
+}
+
+enum Response {
+    JoinStream(tonic::Response<tonic::codec::Streaming<proto::Event>>),
+}
+
+pub struct Subscription<'a> {
+    stream: tonic::codec::Streaming<proto::Event>,
+    client: &'a Client,
+}
+
+impl Client {
+    pub async fn new(addr: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let client = Client {
+            client: RwLock::new(Self::connect(addr).await?),
+        };
+        Ok(client)
+    }
+
+    async fn connect(addr: &str) -> Result<BroadcastClient<Channel>, Box<dyn std::error::Error>> {
+        let endpoint = Endpoint::from_shared(format!("grpc://{}", addr))
+            .map(|e| e.tcp_keepalive(Some(KEEP_ALIVE_DURATION)))
+            .unwrap();
+        let channel = endpoint.connect().await;
+        Ok(channel.map(|chan| BroadcastClient::new(chan))?)
+    }
+}
 
 pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Error>> {
     let channel = Channel::from_shared(opts.server_addr)?;
@@ -32,6 +66,8 @@ pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Erro
     let mut prompt = FramedWrite::new(io::stdout(), LinesCodec::new());
     // Send a prompt to the client to enter their username.
     prompt.send("Please enter your username:").await?;
+
+    let stdin = io::stdin();
 
     let mut input = FramedRead::new(io::stdin(), LinesCodec::new());
 
@@ -106,29 +142,27 @@ pub async fn client_run(opts: ClientOpts) -> Result<(), Box<dyn std::error::Erro
         // msg.timestamp
         // let output = format!("{}: {}", msg, msg);
         match msg.event {
-            Some(event) => {
-                match event {
-                    proto::event::Event::Log(event_log) => {
-                        let user = match event_log.user {
-                            Some(user) => user.name,
-                            _ => "anonymous".to_string(),
-                        };
-                        let msg = match event_log.message {
-                            Some(msg) => msg.content,
-                            _ => "FAILED".to_string(),
-                        };
-                        println!("{}: {}", user, msg);
-                    },
-                    proto::event::Event::Join(event_join) => {
-                        let user = match event_join.user {
-                            Some(user) => user.name,
-                            _ => "anonymous".to_string(),
-                        };
-                        println!("{}: has joined the chat", user);
-                    },
-                    _ => {
-                        println!("UNKNOWN");
-                    }
+            Some(event) => match event {
+                proto::event::Event::Log(event_log) => {
+                    let user = match event_log.user {
+                        Some(user) => user.name,
+                        _ => "anonymous".to_string(),
+                    };
+                    let msg = match event_log.message {
+                        Some(msg) => msg.content,
+                        _ => "FAILED".to_string(),
+                    };
+                    println!("{}: {}", user, msg);
+                }
+                proto::event::Event::Join(event_join) => {
+                    let user = match event_join.user {
+                        Some(user) => user.name,
+                        _ => "anonymous".to_string(),
+                    };
+                    println!("{}: has joined the chat", user);
+                }
+                _ => {
+                    println!("UNKNOWN");
                 }
             },
             _ => {

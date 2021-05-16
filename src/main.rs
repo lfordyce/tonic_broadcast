@@ -11,6 +11,7 @@ pub struct ServerOpts {
 
 /// runs the gRPC client
 #[derive(Clap, Debug)]
+#[clap(version = "1.0")]
 pub struct ClientOpts {
     #[clap(short, long, default_value = "http://[::1]:20000")]
     pub server_addr: String,
@@ -63,8 +64,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cmd::server::start_server(s).await?;
         }
         SubCommand::Client(c) => {
-            tracing::info!("Client started connected to: {}", c.server_addr);
-            cmd::client::client_run(c).await?;
+            tracing::info!("Client started conxnected to: {}", c.server_addr);
+            // cmd::client::client::client_run(c).await?;
+            let mut ui = cmd::client::ui::Ui::new()?;
+            ui.render().await?;
+            // cmd::client::ui::run_ui().await?;
+            // cmd::client::client_run(c).await?;
         }
     }
     Ok(())
